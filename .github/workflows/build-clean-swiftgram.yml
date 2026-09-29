@@ -17,22 +17,170 @@ jobs:
 
       - name: Select required Xcode
         run: |
-          XCODE_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')
-          echo "Using Xcode $XCODE_VERSION"
-          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          set -e
+
+          XCODE_VERSION=$(python3 - <<'PY'
+          import json
+          with open("versions.json", "r") as f:
+              data = json.load(f)
+          print(data["xcode"])
+          PY
+          )
+
+          echo "Swiftgram requires Xcode: $XCODE_VERSION"
+
+          XCODE_PATH="/Applications/Xcode_${XCODE_VERSION}.app"
+
+          if [ ! -d "$XCODE_PATH" ]; then
+            echo "Required Xcode was not found at:"
+            echo "$XCODE_PATH"
+            echo
+            echo "Available Xcode installations:"
+            ls -1 /Applications | grep '^Xcode' || true
+            exit 1
+          fi
+
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
 
       - name: Create canonical source directory
         run: |
+          set -e
+
           sudo mkdir -p /Users/Shared
           sudo rm -rf /Users/Shared/telegram-ios
+
           cp -R "$GITHUB_WORKSPACE" /Users/Shared/telegram-ios
+
+          cd /Users/Shared/telegram-ios
+
+          echo "Repository copied successfully."
+          git status --short || true
+          git rev-parse --short HEAD
+
+      - name: Prepare Swiftgram build configuration
+        run: |
+          set -e
+
+          cd /Users/Shared/telegram-ios
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("build-system")
+          appstore_path = root / "appstore-configuration.json"
+          output_path = root / "ci-swiftgram-configuration.json"
+
+          if not appstore_path.exists():
+              raise SystemExit(
+                  f"ERROR: {appstore_path} does not exist"
+              )
+
+          with appstore_path.open("r", encoding="utf-8") as f:
+              appstore = json.load(f)
+
+          print("appstore configuration keys:")
+          print(sorted(appstore.keys()))
+
+          if "sg_config" in appstore:
+              print("appstore-configuration.json already contains sg_config.")
+          else:
+              print("sg_config is missing from appstore-configuration.json.")
+              print("Searching Swiftgram JSON configuration files...")
+
+              candidates = []
+
+              preferred = [
+                  root / "template_minimal_development_configuration.json",
+                  root / "appcenter-configuration.json",
+              ]
+
+              for path in preferred:
+                  if path.exists():
+                      candidates.append(path)
+
+              for path in sorted(root.rglob("*.json")):
+                  if path not in candidates and path != appstore_path:
+                      candidates.append(path)
+
+              found_path = None
+              found_value = None
+
+              for path in candidates:
+                  try:
+                      with path.open("r", encoding="utf-8") as f:
+                          data = json.load(f)
+                  except Exception:
+                      continue
+
+                  if isinstance(data, dict) and "sg_config" in data:
+                      found_path = path
+                      found_value = data["sg_config"]
+                      break
+
+              if found_path is None:
+                  print()
+                  print("ERROR: Could not find sg_config in any build-system JSON.")
+                  print()
+                  print("JSON files inspected:")
+                  for path in candidates:
+                      print(" -", path)
+
+                  raise SystemExit(1)
+
+              print(f"Found sg_config in: {found_path}")
+              appstore["sg_config"] = found_value
+
+          with output_path.open("w", encoding="utf-8") as f:
+              json.dump(
+                  appstore,
+                  f,
+                  indent=2,
+                  ensure_ascii=False
+              )
+              f.write("\n")
+
+          print()
+          print("Generated configuration:")
+          print(output_path)
+          print()
+          print("Final configuration keys:")
+          print(sorted(appstore.keys()))
+          print()
+          print("sg_config:")
+          print(
+              json.dumps(
+                  appstore["sg_config"],
+                  indent=2,
+                  ensure_ascii=False
+              )
+          )
+          PY
+
+          echo
+          echo "Checking generated JSON..."
+          python3 -m json.tool \
+            build-system/ci-swiftgram-configuration.json \
+            > /dev/null
+
+          echo "Configuration JSON is valid."
+
+      - name: Import fake signing certificates
+        run: |
+          set -e
+
+          cd /Users/Shared/telegram-ios
+
+          python3 build-system/Make/ImportCertificates.py \
+            --path build-system/fake-codesigning/certs
 
       - name: Build clean arm64 IPA
         run: |
           set -e
+          set -o pipefail
 
-          SOURCE_DIR=/Users/Shared/telegram-ios
+          SOURCE_DIR="/Users/Shared/telegram-ios"
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
 
           cd "$SOURCE_DIR"
@@ -42,42 +190,83 @@ jobs:
           BUILD_NUMBER=$((COMMIT_COUNT + BUILD_NUMBER_OFFSET))
 
           echo "Build number: $BUILD_NUMBER"
-
-          python3 build-system/Make/ImportCertificates.py \
-            --path build-system/fake-codesigning/certs
+          echo "Commit count: $COMMIT_COUNT"
+          echo "Build number offset: $BUILD_NUMBER_OFFSET"
 
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             build \
-            --configurationPath="build-system/appstore-configuration.json" \
-            --codesigningInformationPath=build-system/fake-codesigning \
+            --configurationPath="build-system/ci-swiftgram-configuration.json" \
+            --codesigningInformationPath="build-system/fake-codesigning" \
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
 
-          mkdir -p "$GITHUB_WORKSPACE/output"
+      - name: Locate IPA
+        run: |
+          set -e
 
-          IPA_FOUND=0
+          cd /Users/Shared/telegram-ios
 
-          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
-            if [ -f "$f" ]; then
-              cp "$f" "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
-              IPA_FOUND=1
-              break
-            fi
-          done
+          echo "Searching for generated IPA..."
 
-          if [ "$IPA_FOUND" -ne 1 ]; then
-            echo "IPA was not found"
-            find bazel-out -name "*.ipa" -print || true
+          find . \
+            -type f \
+            -name "*.ipa" \
+            -print \
+            2>/dev/null || true
+
+          IPA_PATH="$(find . \
+            -type f \
+            -name "Telegram.ipa" \
+            -print \
+            2>/dev/null | head -n 1)"
+
+          if [ -z "$IPA_PATH" ]; then
+            IPA_PATH="$(find . \
+              -type f \
+              -name "*.ipa" \
+              -print \
+              2>/dev/null | head -n 1)"
+          fi
+
+          if [ -z "$IPA_PATH" ]; then
+            echo "ERROR: Build completed but no IPA was found."
             exit 1
           fi
 
-          ls -lh "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
+          echo "Found IPA:"
+          echo "$IPA_PATH"
 
-      - name: Upload IPA
+          mkdir -p "$GITHUB_WORKSPACE/output"
+
+          cp "$IPA_PATH" \
+            "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
+
+          ls -lh \
+            "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
+
+      - name: Verify IPA archive
+        run: |
+          set -e
+
+          IPA="$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
+
+          unzip -t "$IPA"
+
+          echo
+          echo "IPA archive is valid."
+
+          echo
+          echo "Top-level application:"
+          unzip -l "$IPA" \
+            | grep "Payload/.*\.app/" \
+            | head -n 20 || true
+
+      - name: Upload clean Swiftgram IPA
         uses: actions/upload-artifact@v4
         with:
           name: Swiftgram-clean-IPA
           path: output/Swiftgram-clean.ipa
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
