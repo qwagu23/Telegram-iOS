@@ -1,0 +1,83 @@
+name: Build Clean Swiftgram IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Select required Xcode
+        run: |
+          XCODE_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')
+          echo "Using Xcode $XCODE_VERSION"
+          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          xcodebuild -version
+
+      - name: Create canonical source directory
+        run: |
+          sudo mkdir -p /Users/Shared
+          sudo rm -rf /Users/Shared/telegram-ios
+          cp -R "$GITHUB_WORKSPACE" /Users/Shared/telegram-ios
+
+      - name: Build clean arm64 IPA
+        run: |
+          set -e
+
+          SOURCE_DIR=/Users/Shared/telegram-ios
+          BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
+
+          cd "$SOURCE_DIR"
+
+          BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
+          COMMIT_COUNT="$(git rev-list --count HEAD)"
+          BUILD_NUMBER=$((COMMIT_COUNT + BUILD_NUMBER_OFFSET))
+
+          echo "Build number: $BUILD_NUMBER"
+
+          python3 build-system/Make/ImportCertificates.py \
+            --path build-system/fake-codesigning/certs
+
+          python3 -u build-system/Make/Make.py \
+            --bazelUserRoot="$BAZEL_USER_ROOT" \
+            build \
+            --configurationPath="build-system/appstore-configuration.json" \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER"
+
+          mkdir -p "$GITHUB_WORKSPACE/output"
+
+          IPA_FOUND=0
+
+          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
+            if [ -f "$f" ]; then
+              cp "$f" "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
+              IPA_FOUND=1
+              break
+            fi
+          done
+
+          if [ "$IPA_FOUND" -ne 1 ]; then
+            echo "IPA was not found"
+            find bazel-out -name "*.ipa" -print || true
+            exit 1
+          fi
+
+          ls -lh "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Swiftgram-clean-IPA
+          path: output/Swiftgram-clean.ipa
+          if-no-files-found: error
+          compression-level: 0
