@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout source
@@ -21,18 +21,20 @@ jobs:
 
           XCODE_VERSION=$(python3 - <<'PY'
           import json
-          with open("versions.json", "r") as f:
+
+          with open("versions.json", "r", encoding="utf-8") as f:
               data = json.load(f)
+
           print(data["xcode"])
           PY
           )
 
-          echo "Swiftgram requires Xcode: $XCODE_VERSION"
+          echo "Required Xcode: $XCODE_VERSION"
 
           XCODE_PATH="/Applications/Xcode_${XCODE_VERSION}.app"
 
           if [ ! -d "$XCODE_PATH" ]; then
-            echo "Required Xcode was not found at:"
+            echo "Required Xcode was not found:"
             echo "$XCODE_PATH"
             echo
             echo "Available Xcode installations:"
@@ -41,6 +43,9 @@ jobs:
           fi
 
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+
+          echo
+          echo "Selected Xcode:"
           xcodebuild -version
 
       - name: Create canonical source directory
@@ -54,8 +59,11 @@ jobs:
 
           cd /Users/Shared/telegram-ios
 
-          echo "Repository copied successfully."
-          git status --short || true
+          echo "Source directory:"
+          pwd
+
+          echo
+          echo "Git commit:"
           git rev-parse --short HEAD
 
       - name: Prepare Swiftgram build configuration
@@ -68,90 +76,94 @@ jobs:
           import json
           from pathlib import Path
 
-          root = Path("build-system")
-          appstore_path = root / "appstore-configuration.json"
-          output_path = root / "ci-swiftgram-configuration.json"
+          build_system = Path("build-system")
+
+          appstore_path = build_system / "appstore-configuration.json"
+          output_path = build_system / "ci-swiftgram-configuration.json"
 
           if not appstore_path.exists():
               raise SystemExit(
-                  f"ERROR: {appstore_path} does not exist"
+                  f"ERROR: {appstore_path} was not found."
               )
 
           with appstore_path.open("r", encoding="utf-8") as f:
-              appstore = json.load(f)
+              config = json.load(f)
 
-          print("appstore configuration keys:")
-          print(sorted(appstore.keys()))
+          print("Original configuration keys:")
+          print(sorted(config.keys()))
 
-          if "sg_config" in appstore:
-              print("appstore-configuration.json already contains sg_config.")
-          else:
-              print("sg_config is missing from appstore-configuration.json.")
-              print("Searching Swiftgram JSON configuration files...")
+          if "sg_config" not in config:
+              print()
+              print("sg_config is missing.")
+              print("Searching build-system JSON files...")
 
               candidates = []
 
               preferred = [
-                  root / "template_minimal_development_configuration.json",
-                  root / "appcenter-configuration.json",
+                  build_system / "template_minimal_development_configuration.json",
+                  build_system / "template_minimal_configuration.json",
+                  build_system / "appcenter-configuration.json",
+                  build_system / "development-configuration.json",
               ]
 
               for path in preferred:
-                  if path.exists():
+                  if path.exists() and path not in candidates:
                       candidates.append(path)
 
-              for path in sorted(root.rglob("*.json")):
+              for path in sorted(build_system.rglob("*.json")):
                   if path not in candidates and path != appstore_path:
                       candidates.append(path)
 
-              found_path = None
-              found_value = None
+              found = None
 
               for path in candidates:
                   try:
                       with path.open("r", encoding="utf-8") as f:
-                          data = json.load(f)
+                          candidate = json.load(f)
                   except Exception:
                       continue
 
-                  if isinstance(data, dict) and "sg_config" in data:
-                      found_path = path
-                      found_value = data["sg_config"]
+                  if isinstance(candidate, dict) and "sg_config" in candidate:
+                      found = (path, candidate["sg_config"])
                       break
 
-              if found_path is None:
+              if found is None:
                   print()
-                  print("ERROR: Could not find sg_config in any build-system JSON.")
+                  print("ERROR: sg_config could not be found.")
                   print()
-                  print("JSON files inspected:")
+                  print("JSON files checked:")
                   for path in candidates:
                       print(" -", path)
+                  exit(1)
 
-                  raise SystemExit(1)
+              source_path, sg_config = found
 
-              print(f"Found sg_config in: {found_path}")
-              appstore["sg_config"] = found_value
+              print(f"Found sg_config in: {source_path}")
 
-          with output_path.open("w", encoding="utf-8") as f:
-              json.dump(
-                  appstore,
-                  f,
+              config["sg_config"] = sg_config
+
+          output_path.write_text(
+              json.dumps(
+                  config,
                   indent=2,
                   ensure_ascii=False
-              )
-              f.write("\n")
+              ) + "\n",
+              encoding="utf-8"
+          )
 
           print()
           print("Generated configuration:")
           print(output_path)
+
           print()
           print("Final configuration keys:")
-          print(sorted(appstore.keys()))
+          print(sorted(config.keys()))
+
           print()
           print("sg_config:")
           print(
               json.dumps(
-                  appstore["sg_config"],
+                  config["sg_config"],
                   indent=2,
                   ensure_ascii=False
               )
@@ -159,12 +171,13 @@ jobs:
           PY
 
           echo
-          echo "Checking generated JSON..."
+          echo "Validating generated JSON..."
+
           python3 -m json.tool \
             build-system/ci-swiftgram-configuration.json \
             > /dev/null
 
-          echo "Configuration JSON is valid."
+          echo "JSON validation successful."
 
       - name: Import fake signing certificates
         run: |
@@ -180,10 +193,10 @@ jobs:
           set -e
           set -o pipefail
 
-          SOURCE_DIR="/Users/Shared/telegram-ios"
-          BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
+          cd /Users/Shared/telegram-ios
 
-          cd "$SOURCE_DIR"
+          CACHE_DIR="$HOME/telegram-bazel-cache"
+          BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
 
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
           COMMIT_COUNT="$(git rev-list --count HEAD)"
@@ -192,8 +205,10 @@ jobs:
           echo "Build number: $BUILD_NUMBER"
           echo "Commit count: $COMMIT_COUNT"
           echo "Build number offset: $BUILD_NUMBER_OFFSET"
+          echo "Cache directory: $CACHE_DIR"
 
           python3 -u build-system/Make/Make.py \
+            --cacheDir="$CACHE_DIR" \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             build \
             --configurationPath="build-system/ci-swiftgram-configuration.json" \
@@ -201,40 +216,70 @@ jobs:
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
 
-      - name: Locate IPA
+      - name: Locate generated IPA
         run: |
           set -e
 
           cd /Users/Shared/telegram-ios
 
           echo "Searching for generated IPA..."
+          echo
 
-          find . \
-            -type f \
-            -name "*.ipa" \
-            -print \
-            2>/dev/null || true
+          IPA_PATH=""
 
-          IPA_PATH="$(find . \
-            -type f \
-            -name "Telegram.ipa" \
-            -print \
-            2>/dev/null | head -n 1)"
+          # Standard output location used by the Telegram build system.
+          if [ -f "build/artifacts/Telegram.ipa" ]; then
+            IPA_PATH="build/artifacts/Telegram.ipa"
+            echo "Found standard output:"
+            echo "$IPA_PATH"
+          fi
 
+          # Fallback: search through symlinks as well.
           if [ -z "$IPA_PATH" ]; then
-            IPA_PATH="$(find . \
+            echo "Standard output was not found."
+            echo "Searching the repository with symlink traversal..."
+
+            IPA_PATH="$(find -L . \
               -type f \
               -name "*.ipa" \
               -print \
-              2>/dev/null | head -n 1)"
+              2>/dev/null | head -n 1 || true)"
+          fi
+
+          # Fallback: search common Bazel output locations explicitly.
+          if [ -z "$IPA_PATH" ] && [ -d "bazel-bin" ]; then
+            echo "Searching bazel-bin..."
+
+            IPA_PATH="$(find -L bazel-bin \
+              -type f \
+              -name "*.ipa" \
+              -print \
+              2>/dev/null | head -n 1 || true)"
           fi
 
           if [ -z "$IPA_PATH" ]; then
-            echo "ERROR: Build completed but no IPA was found."
+            echo
+            echo "ERROR: Build finished but no IPA was found."
+            echo
+
+            echo "Contents of build/:"
+            find -L build \
+              -maxdepth 5 \
+              -print \
+              2>/dev/null | head -n 200 || true
+
+            echo
+            echo "Contents matching IPA / Telegram:"
+            find -L . \
+              \( -iname "*telegram*" -o -iname "*.ipa" \) \
+              -print \
+              2>/dev/null | head -n 300 || true
+
             exit 1
           fi
 
-          echo "Found IPA:"
+          echo
+          echo "IPA found:"
           echo "$IPA_PATH"
 
           mkdir -p "$GITHUB_WORKSPACE/output"
@@ -242,14 +287,18 @@ jobs:
           cp "$IPA_PATH" \
             "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
 
+          echo
+          echo "Copied IPA:"
           ls -lh \
             "$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
 
-      - name: Verify IPA archive
+      - name: Verify IPA
         run: |
           set -e
 
           IPA="$GITHUB_WORKSPACE/output/Swiftgram-clean.ipa"
+
+          echo "Testing IPA archive..."
 
           unzip -t "$IPA"
 
@@ -257,12 +306,12 @@ jobs:
           echo "IPA archive is valid."
 
           echo
-          echo "Top-level application:"
+          echo "Application contents:"
           unzip -l "$IPA" \
-            | grep "Payload/.*\.app/" \
-            | head -n 20 || true
+            | grep "Payload/" \
+            | head -n 50 || true
 
-      - name: Upload clean Swiftgram IPA
+      - name: Upload Swiftgram IPA
         uses: actions/upload-artifact@v4
         with:
           name: Swiftgram-clean-IPA
