@@ -67,6 +67,9 @@ jobs:
           git rev-parse --short HEAD
 
       - name: Prepare Swiftgram build configuration
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: |
           set -e
 
@@ -74,73 +77,62 @@ jobs:
 
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           build_system = Path("build-system")
 
-          appstore_path = build_system / "appstore-configuration.json"
-          output_path = build_system / "ci-swiftgram-configuration.json"
+          template_path = (
+              build_system /
+              "template_minimal_development_configuration.json"
+          )
+
+          appstore_path = (
+              build_system /
+              "appstore-configuration.json"
+          )
+
+          output_path = (
+              build_system /
+              "ci-swiftgram-configuration.json"
+          )
+
+          if not template_path.exists():
+              raise SystemExit(
+                  f"ERROR: Template not found: {template_path}"
+              )
 
           if not appstore_path.exists():
               raise SystemExit(
-                  f"ERROR: {appstore_path} was not found."
+                  f"ERROR: App Store configuration not found: {appstore_path}"
               )
 
-          with appstore_path.open("r", encoding="utf-8") as f:
+          api_id = os.environ.get("TELEGRAM_API_ID", "").strip()
+          api_hash = os.environ.get("TELEGRAM_API_HASH", "").strip()
+
+          if not api_id or not api_hash:
+              raise SystemExit(
+                  "ERROR: Telegram API secrets are missing."
+              )
+
+          with template_path.open("r", encoding="utf-8") as f:
               config = json.load(f)
 
-          print("Original configuration keys:")
-          print(sorted(config.keys()))
+          with appstore_path.open("r", encoding="utf-8") as f:
+              appstore_config = json.load(f)
 
-          if "sg_config" not in config:
-              print()
-              print("sg_config is missing.")
-              print("Searching build-system JSON files...")
+          config["bundle_id"] = "org.artiom.swiftgramcustom"
+          config["api_id"] = api_id
+          config["api_hash"] = api_hash
 
-              candidates = []
+          team_id = appstore_config.get("team_id", "")
 
-              preferred = [
-                  build_system / "template_minimal_development_configuration.json",
-                  build_system / "template_minimal_configuration.json",
-                  build_system / "appcenter-configuration.json",
-                  build_system / "development-configuration.json",
-              ]
+          if team_id:
+              config["team_id"] = team_id
 
-              for path in preferred:
-                  if path.exists() and path not in candidates:
-                      candidates.append(path)
-
-              for path in sorted(build_system.rglob("*.json")):
-                  if path not in candidates and path != appstore_path:
-                      candidates.append(path)
-
-              found = None
-
-              for path in candidates:
-                  try:
-                      with path.open("r", encoding="utf-8") as f:
-                          candidate = json.load(f)
-                  except Exception:
-                      continue
-
-                  if isinstance(candidate, dict) and "sg_config" in candidate:
-                      found = (path, candidate["sg_config"])
-                      break
-
-              if found is None:
-                  print()
-                  print("ERROR: sg_config could not be found.")
-                  print()
-                  print("JSON files checked:")
-                  for path in candidates:
-                      print(" -", path)
-                  exit(1)
-
-              source_path, sg_config = found
-
-              print(f"Found sg_config in: {source_path}")
-
-              config["sg_config"] = sg_config
+          if not config.get("sg_config"):
+              if appstore_config.get("sg_config"):
+                  config["sg_config"] = appstore_config["sg_config"]
 
           output_path.write_text(
               json.dumps(
@@ -151,22 +143,14 @@ jobs:
               encoding="utf-8"
           )
 
-          print()
-          print("Generated configuration:")
-          print(output_path)
-
-          print()
-          print("Final configuration keys:")
-          print(sorted(config.keys()))
-
-          print()
-          print("sg_config:")
+          print("Swiftgram configuration generated.")
+          print("Bundle ID:", config["bundle_id"])
+          print("Team ID:", config.get("team_id", ""))
+          print("API credentials: loaded from GitHub Secrets")
+          print("API credentials are not displayed.")
           print(
-              json.dumps(
-                  config["sg_config"],
-                  indent=2,
-                  ensure_ascii=False
-              )
+              "sg_config:",
+              "present" if config.get("sg_config") else "empty"
           )
           PY
 
@@ -227,14 +211,12 @@ jobs:
 
           IPA_PATH=""
 
-          # Standard output location used by the Telegram build system.
           if [ -f "build/artifacts/Telegram.ipa" ]; then
             IPA_PATH="build/artifacts/Telegram.ipa"
             echo "Found standard output:"
             echo "$IPA_PATH"
           fi
 
-          # Fallback: search through symlinks as well.
           if [ -z "$IPA_PATH" ]; then
             echo "Standard output was not found."
             echo "Searching the repository with symlink traversal..."
@@ -246,7 +228,6 @@ jobs:
               2>/dev/null | head -n 1 || true)"
           fi
 
-          # Fallback: search common Bazel output locations explicitly.
           if [ -z "$IPA_PATH" ] && [ -d "bazel-bin" ]; then
             echo "Searching bazel-bin..."
 
