@@ -106,13 +106,24 @@ jobs:
             TEMP_PLIST="$(mktemp)"
 
             if security cms -D -i "$PROFILE" > "$TEMP_PLIST" 2>/dev/null; then
+
+              echo "Profile name:"
               /usr/libexec/PlistBuddy -c "Print :Name" "$TEMP_PLIST" 2>/dev/null || true
+
+              echo "Profile UUID:"
               /usr/libexec/PlistBuddy -c "Print :UUID" "$TEMP_PLIST" 2>/dev/null || true
+
+              echo "Expiration date:"
               /usr/libexec/PlistBuddy -c "Print :ExpirationDate" "$TEMP_PLIST" 2>/dev/null || true
+
+              echo "Application identifier:"
               /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$TEMP_PLIST" 2>/dev/null || true
+
+              echo "APS environment:"
               /usr/libexec/PlistBuddy -c "Print :Entitlements:aps-environment" "$TEMP_PLIST" 2>/dev/null || echo "aps-environment: MISSING"
 
               echo "Profile decoded successfully."
+
             else
               echo "Could not decode this file as a provisioning profile."
             fi
