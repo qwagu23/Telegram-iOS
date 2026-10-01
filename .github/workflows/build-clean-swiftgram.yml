@@ -20,19 +20,22 @@ jobs:
           set -e
 
           echo "Available Xcode installations:"
-          ls -la /Applications | grep Xcode || true
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
 
-          if [ -d "/Applications/Xcode_26.2.app" ]; then
-            sudo xcode-select -s "/Applications/Xcode_26.2.app/Contents/Developer"
-          else
-            echo "ERROR: Xcode 26.2 was not found."
+          XCODE_APP=$(ls -d /Applications/Xcode_26.2*.app /Applications/Xcode-26.2*.app 2>/dev/null | head -n 1 || true)
+
+          if [ -z "$XCODE_APP" ]; then
+            echo "Xcode 26.2 was not found."
             xcodebuild -version || true
             exit 1
           fi
 
-          echo
-          echo "Selected Xcode:"
+          echo "Using: $XCODE_APP"
+
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+
           xcodebuild -version
+          xcode-select -p
 
       - name: Prepare Swiftgram configuration
         env:
@@ -41,23 +44,17 @@ jobs:
         run: |
           set -e
 
-          cd /Users/Shared/telegram-ios
+          test -n "$TELEGRAM_API_ID"
+          test -n "$TELEGRAM_API_HASH"
 
           python3 - <<'PY'
           import json
           import os
 
-          api_id = os.environ.get("TELEGRAM_API_ID", "").strip()
-          api_hash = os.environ.get("TELEGRAM_API_HASH", "").strip()
-
-          if not api_id:
-              raise SystemExit("ERROR: TELEGRAM_API_ID secret is empty")
-
-          if not api_hash:
-              raise SystemExit("ERROR: TELEGRAM_API_HASH secret is empty")
+          api_id = os.environ["TELEGRAM_API_ID"]
+          api_hash = os.environ["TELEGRAM_API_HASH"]
 
           configuration = {
-              "sg_config": "",
               "bundle_id": "ph.telegra.Telegraph",
               "api_id": api_id,
               "api_hash": api_hash,
@@ -72,200 +69,220 @@ jobs:
               "enable_icloud": True
           }
 
-          path = "swiftgram-build-configuration.json"
-
-          with open(path, "w", encoding="utf-8") as f:
+          with open("swiftgram-build-configuration.json", "w") as f:
               json.dump(configuration, f, indent=2)
-              f.write("\n")
 
           print("Swiftgram configuration generated.")
           print("Bundle ID:", configuration["bundle_id"])
           print("Team ID:", configuration["team_id"])
           print("API credentials: loaded from GitHub Secrets")
-          print("Configuration file:", path)
-
-          with open(path, encoding="utf-8") as f:
-              json.load(f)
-
-          print("JSON validation successful.")
           PY
 
-      - name: Verify provisioning profiles
+          echo "Configuration:"
+          cat swiftgram-build-configuration.json | sed \
+            -e 's/"api_hash": ".*"/"api_hash": "***"/' \
+            -e 's/"api_id": ".*"/"api_id": "***"/'
+
+      - name: Verify fake codesigning files
         run: |
           set -e
 
-          cd /Users/Shared/telegram-ios
-
-          PROFILE_DIR="build-system/fake-codesigning/profiles"
-          CERT_DIR="build-system/fake-codesigning/certs"
-
-          echo "========================================"
-          echo "Codesigning material"
-          echo "========================================"
-
-          echo
           echo "Profiles:"
-          find "$PROFILE_DIR" \
+          find build-system/fake-codesigning/profiles \
             -maxdepth 1 \
             -type f \
             -name "*.mobileprovision" \
-            -print | sort
+            -print \
+            | sort
 
           echo
           echo "Certificates:"
-          find "$CERT_DIR" \
+          find build-system/fake-codesigning/certs \
             -maxdepth 1 \
             -type f \
             \( -name "*.p12" -o -name "*.cer" \) \
-            -print | sort
+            -print \
+            | sort
 
           echo
-          echo "========================================"
-          echo "Checking profiles for:"
-          echo "C67CF9S4VU.ph.telegra.Telegraph"
-          echo "========================================"
+          PROFILE_COUNT=$(find build-system/fake-codesigning/profiles \
+            -maxdepth 1 \
+            -type f \
+            -name "*.mobileprovision" \
+            | wc -l | tr -d ' ')
 
-          FOUND=0
+          CERT_COUNT=$(find build-system/fake-codesigning/certs \
+            -maxdepth 1 \
+            -type f \
+            \( -name "*.p12" -o -name "*.cer" \) \
+            | wc -l | tr -d ' ')
 
-          for profile in "$PROFILE_DIR"/*.mobileprovision; do
-            [ -e "$profile" ] || continue
+          echo "Provisioning profiles: $PROFILE_COUNT"
+          echo "Certificates: $CERT_COUNT"
 
-            TMP_PLIST="$(mktemp)"
+          test "$PROFILE_COUNT" -gt 0
+          test "$CERT_COUNT" -gt 0
 
-            security cms -D -i "$profile" > "$TMP_PLIST"
-
-            APP_ID=$(
-              /usr/libexec/PlistBuddy \
-                -c "Print :Entitlements:application-identifier" \
-                "$TMP_PLIST" 2>/dev/null || true
-            )
-
-            APS_ENV=$(
-              /usr/libexec/PlistBuddy \
-                -c "Print :Entitlements:aps-environment" \
-                "$TMP_PLIST" 2>/dev/null || true
-            )
-
-            PROFILE_NAME=$(
-              /usr/libexec/PlistBuddy \
-                -c "Print :Name" \
-                "$TMP_PLIST" 2>/dev/null || true
-            )
-
-            echo
-            echo "Profile: $profile"
-            echo "Name: ${PROFILE_NAME:-MISSING}"
-            echo "Application identifier: ${APP_ID:-MISSING}"
-            echo "APS environment: ${APS_ENV:-MISSING}"
-
-            if [ "$APP_ID" = "C67CF9S4VU.ph.telegra.Telegraph" ] && \
-               [ "$APS_ENV" = "production" ]; then
-              FOUND=1
-              echo ">>> VALID MAIN PROFILE FOUND <<<"
-            fi
-
-            rm -f "$TMP_PLIST"
-          done
-
-          echo
-          echo "========================================"
-
-          if [ "$FOUND" -ne 1 ]; then
-            echo "ERROR: Required Telegram provisioning profile was not found."
-            echo
-            echo "Expected:"
-            echo "Application identifier: C67CF9S4VU.ph.telegra.Telegraph"
-            echo "APS environment: production"
-            exit 1
-          fi
-
-          echo "Provisioning profile check PASSED."
-
-      - name: Import certificates
+      - name: Validate main provisioning profile
         run: |
           set -e
 
-          cd /Users/Shared/telegram-ios
+          PROFILE="build-system/fake-codesigning/profiles/Telegram.mobileprovision"
 
-          echo "========================================"
-          echo "Importing certificates"
-          echo "========================================"
+          if [ ! -f "$PROFILE" ]; then
+            echo "Telegram.mobileprovision not found."
+            exit 1
+          fi
+
+          security cms -D -i "$PROFILE" > /tmp/telegram-profile.plist
+
+          echo "Main provisioning profile:"
+          /usr/libexec/PlistBuddy -c "Print :Name" /tmp/telegram-profile.plist || true
+          /usr/libexec/PlistBuddy -c "Print :TeamIdentifier:0" /tmp/telegram-profile.plist || true
+          /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" /tmp/telegram-profile.plist || true
+          /usr/libexec/PlistBuddy -c "Print :Entitlements:aps-environment" /tmp/telegram-profile.plist || true
+
+          APP_ID=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :Entitlements:application-identifier" \
+              /tmp/telegram-profile.plist
+          )
+
+          APS=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :Entitlements:aps-environment" \
+              /tmp/telegram-profile.plist
+          )
+
+          test "$APP_ID" = "C67CF9S4VU.ph.telegra.Telegraph"
+          test "$APS" = "production"
+
+          echo
+          echo "Provisioning profile matches:"
+          echo "  Team ID: C67CF9S4VU"
+          echo "  Bundle ID: ph.telegra.Telegraph"
+          echo "  APS: production"
+
+      - name: Import fake signing certificates
+        run: |
+          set -e
 
           python3 build-system/Make/ImportCertificates.py \
             --path build-system/fake-codesigning/certs
 
           echo
-          echo "Certificate import completed."
+          echo "Available code-signing identities:"
+          security find-identity -v -p codesigning || true
 
-      - name: Generate Xcode project
+      - name: Show build environment
         run: |
           set -e
 
-          cd /Users/Shared/telegram-ios
+          echo "macOS:"
+          sw_vers
 
-          rm -rf build-input/configuration-repository
+          echo
+          echo "Xcode:"
+          xcodebuild -version
 
-          python3 build-system/Make/Make.py \
-            --cacheDir="/Users/runner/telegram-bazel-cache" \
-            generateProject \
-            --configurationPath="swiftgram-build-configuration.json" \
-            --codesigningInformationPath="build-system/fake-codesigning" \
-            --buildNumber=34492 \
-            --projectIncludeRelease
+          echo
+          echo "Swift:"
+          swift --version
 
-      - name: Build clean arm64 Swiftgram IPA
+          echo
+          echo "Git:"
+          git --version
+
+          echo
+          echo "Commit:"
+          git rev-parse HEAD
+
+          echo
+          echo "Build number offset:"
+          cat build_number_offset || true
+
+      - name: Build Swiftgram arm64 IPA
+        env:
+          BUILD_NUMBER: "34492"
         run: |
           set -e
-
-          cd /Users/Shared/telegram-ios
 
           rm -rf build/artifacts
           mkdir -p build/artifacts
 
-          python3 build-system/Make/Make.py \
+          python3 -u build-system/Make/Make.py \
             --cacheDir="/Users/runner/telegram-bazel-cache" \
             build \
             --configurationPath="swiftgram-build-configuration.json" \
             --codesigningInformationPath="build-system/fake-codesigning" \
-            --buildNumber=34492 \
+            --buildNumber="$BUILD_NUMBER" \
             --configuration=release_arm64 \
             --outputBuildArtifactsPath="build/artifacts"
 
-      - name: Verify generated IPA
+      - name: Verify Swiftgram IPA
         run: |
           set -e
 
-          cd /Users/Shared/telegram-ios
+          IPA="build/artifacts/Swiftgram.ipa"
 
-          echo "========================================"
-          echo "Build artifacts"
-          echo "========================================"
-
-          find build/artifacts \
-            -maxdepth 2 \
-            -type f \
-            -print | sort
-
-          if [ ! -f "build/artifacts/Swiftgram.ipa" ]; then
+          if [ ! -f "$IPA" ]; then
+            echo "Swiftgram IPA was not generated."
             echo
-            echo "ERROR: Swiftgram.ipa was not generated."
+            echo "Contents of build/artifacts:"
+            find build/artifacts -maxdepth 3 -print || true
+            echo
+            echo "Searching entire repository for IPA files:"
+            find . -type f -name "*.ipa" -print || true
+            exit 1
+          fi
+
+          echo "IPA found:"
+          ls -lh "$IPA"
+
+          echo
+          echo "IPA contents:"
+          unzip -l "$IPA" | head -n 80
+
+          echo
+          echo "Checking Payload..."
+          unzip -q "$IPA" -d /tmp/swiftgram-ipa
+
+          APP="/tmp/swiftgram-ipa/Payload/Telegram.app"
+
+          if [ ! -d "$APP" ]; then
+            echo "Telegram.app was not found inside the IPA."
+            find /tmp/swiftgram-ipa -maxdepth 4 -print
             exit 1
           fi
 
           echo
-          echo "IPA successfully generated:"
-          ls -lh "build/artifacts/Swiftgram.ipa"
+          echo "App bundle:"
+          ls -lah "$APP" | head -n 40
 
           echo
-          echo "Checking IPA contents:"
-          unzip -l "build/artifacts/Swiftgram.ipa" | head -40
+          echo "Bundle identifier:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$APP/Info.plist"
+
+          echo
+          echo "Version:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleShortVersionString" \
+            "$APP/Info.plist"
+
+          echo
+          echo "Build:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleVersion" \
+            "$APP/Info.plist"
 
       - name: Upload Swiftgram IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Swiftgram-iOS-27-arm64
+          name: Swiftgram-iOS-arm64
           path: |
-            /Users/Shared/telegram-ios/build/artifacts/Swiftgram.ipa
-            /Users/Shared/telegram-ios/build/artifacts/Swiftgram.DSYMs.zip
+            build/artifacts/Swiftgram.ipa
+            build/artifacts/Swiftgram.DSYMs.zip
           if-no-files-found: error
           retention-days: 7
