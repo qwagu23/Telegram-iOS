@@ -1,73 +1,114 @@
-      - name: Diagnose APS provisioning check
+      - name: Import certificates and validate provisioning
         run: |
           set -e
 
           cd /Users/Shared/telegram-ios
 
           echo "========================================"
-          echo "APS provisioning diagnostic"
+          echo "Provisioning profiles diagnostic"
           echo "========================================"
 
+          PROFILE_DIR="build-system/fake-codesigning/profiles"
+          CERT_DIR="build-system/fake-codesigning/certs"
+
+          if [ ! -d "$PROFILE_DIR" ]; then
+            echo "ERROR: Provisioning profiles directory not found:"
+            echo "$PROFILE_DIR"
+            exit 1
+          fi
+
+          if [ ! -d "$CERT_DIR" ]; then
+            echo "ERROR: Certificates directory not found:"
+            echo "$CERT_DIR"
+            exit 1
+          fi
+
           echo
-          echo "=== Make.py APS check ==="
-
-          grep -n -B 12 -A 18 \
-            "Could not find a valid aps-environment" \
-            build-system/Make/Make.py || true
-
-          echo
-          echo "=== Provisioning profiles ==="
-
-          find build-system/fake-codesigning/profiles \
+          echo "Profiles found:"
+          find "$PROFILE_DIR" \
             -maxdepth 1 \
             -type f \
             -name "*.mobileprovision" \
             -print | sort
 
           echo
-          echo "=== APS values in provisioning profiles ==="
+          echo "Checking provisioning profiles..."
+          echo
 
-          for profile in build-system/fake-codesigning/profiles/*.mobileprovision; do
-            echo
+          APS_FOUND=0
+
+          for profile in "$PROFILE_DIR"/*.mobileprovision; do
+            [ -e "$profile" ] || continue
+
             echo "----------------------------------------"
             echo "Profile: $profile"
             echo "----------------------------------------"
 
-            security cms -D -i "$profile" > /tmp/profile.plist 2>/dev/null || {
-              echo "ERROR: Could not decode provisioning profile"
-              continue
-            }
+            TMP_PLIST="$(mktemp)"
 
-            echo "Application identifier:"
-            /usr/libexec/PlistBuddy \
-              -c "Print :Entitlements:application-identifier" \
-              /tmp/profile.plist 2>/dev/null || echo "MISSING"
+            if ! security cms -D -i "$profile" > "$TMP_PLIST" 2>/dev/null; then
+              echo "ERROR: Cannot decode profile"
+              rm -f "$TMP_PLIST"
+              exit 1
+            fi
 
-            echo "APS environment:"
-            /usr/libexec/PlistBuddy \
-              -c "Print :Entitlements:aps-environment" \
-              /tmp/profile.plist 2>/dev/null || echo "MISSING"
+            PROFILE_NAME=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :Name" \
+                "$TMP_PLIST" 2>/dev/null || true
+            )
 
-            echo "Team identifier:"
-            /usr/libexec/PlistBuddy \
-              -c "Print :Entitlements:com.apple.developer.team-identifier" \
-              /tmp/profile.plist 2>/dev/null || echo "MISSING"
+            APP_ID=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :Entitlements:application-identifier" \
+                "$TMP_PLIST" 2>/dev/null || true
+            )
 
-            echo "Profile name:"
-            /usr/libexec/PlistBuddy \
-              -c "Print :Name" \
-              /tmp/profile.plist 2>/dev/null || echo "MISSING"
+            APS_ENV=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :Entitlements:aps-environment" \
+                "$TMP_PLIST" 2>/dev/null || true
+            )
 
-            echo "Expiration date:"
-            /usr/libexec/PlistBuddy \
-              -c "Print :ExpirationDate" \
-              /tmp/profile.plist 2>/dev/null || echo "MISSING"
+            TEAM_ID=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :Entitlements:com.apple.developer.team-identifier" \
+                "$TMP_PLIST" 2>/dev/null || true
+            )
+
+            echo "Profile name: ${PROFILE_NAME:-MISSING}"
+            echo "Application identifier: ${APP_ID:-MISSING}"
+            echo "Team identifier: ${TEAM_ID:-MISSING}"
+            echo "APS environment: ${APS_ENV:-MISSING}"
+
+            if [ -n "$APS_ENV" ]; then
+              APS_FOUND=1
+            fi
+
+            rm -f "$TMP_PLIST"
+            echo
           done
+
+          echo "========================================"
+          echo "APS check result"
+          echo "========================================"
+
+          if [ "$APS_FOUND" -ne 1 ]; then
+            echo "ERROR: No provisioning profile contains aps-environment."
+            exit 1
+          fi
+
+          echo "Valid APS provisioning profile found."
 
           echo
           echo "========================================"
-          echo "Running ImportCertificates.py"
+          echo "Importing certificates"
           echo "========================================"
 
           python3 build-system/Make/ImportCertificates.py \
-            --path build-system/fake-codesigning/certs
+            --path "$CERT_DIR"
+
+          echo
+          echo "========================================"
+          echo "Certificate import completed"
+          echo "========================================"
