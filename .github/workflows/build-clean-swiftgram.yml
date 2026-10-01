@@ -1,6 +1,6 @@
 name: Build Clean Swiftgram IPA
 
-on:
+"on":
   workflow_dispatch:
 
 jobs:
