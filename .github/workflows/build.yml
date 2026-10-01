@@ -1,3 +1,4 @@
+
 name: Build Clean Swiftgram IPA
 
 "on":
@@ -55,6 +56,7 @@ jobs:
           api_hash = os.environ["TELEGRAM_API_HASH"]
 
           configuration = {
+              "sg_config": "",
               "bundle_id": "ph.telegra.Telegraph",
               "api_id": api_id,
               "api_hash": api_hash,
