@@ -66,6 +66,69 @@ jobs:
           echo "Git commit:"
           git rev-parse --short HEAD
 
+      - name: Diagnose provisioning profiles
+        run: |
+          set -e
+
+          cd /Users/Shared/telegram-ios
+
+          PROFILE_DIR="build-system/fake-codesigning/profiles"
+
+          echo "========================================"
+          echo "Provisioning profiles diagnostic"
+          echo "========================================"
+          echo
+
+          if [ ! -d "$PROFILE_DIR" ]; then
+            echo "ERROR: Profiles directory not found:"
+            echo "$PROFILE_DIR"
+            exit 1
+          fi
+
+          echo "Files in profiles directory:"
+          find "$PROFILE_DIR" -maxdepth 3 -type f -print
+
+          echo
+          echo "========================================"
+          echo "Decoding provisioning profiles"
+          echo "========================================"
+
+          FOUND=0
+
+          while IFS= read -r -d '' PROFILE; do
+            FOUND=$((FOUND + 1))
+
+            echo
+            echo "----------------------------------------"
+            echo "Profile: $PROFILE"
+            echo "----------------------------------------"
+
+            TEMP_PLIST="$(mktemp)"
+
+            if security cms -D -i "$PROFILE" > "$TEMP_PLIST" 2>/dev/null; then
+              /usr/libexec/PlistBuddy -c "Print :Name" "$TEMP_PLIST" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Print :UUID" "$TEMP_PLIST" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Print :ExpirationDate" "$TEMP_PLIST" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$TEMP_PLIST" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Print :Entitlements:aps-environment" "$TEMP_PLIST" 2>/dev/null || echo "aps-environment: MISSING"
+
+              echo "Profile decoded successfully."
+            else
+              echo "Could not decode this file as a provisioning profile."
+            fi
+
+            rm -f "$TEMP_PLIST"
+
+          done < <(find "$PROFILE_DIR" -type f \( -name "*.mobileprovision" -o -name "*.provisionprofile" \) -print0)
+
+          echo
+          echo "========================================"
+          echo "Total profile files found: $FOUND"
+          echo "Diagnostic completed."
+          echo "========================================"
+
+          exit 0
+
       - name: Prepare Swiftgram build configuration
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
