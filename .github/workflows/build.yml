@@ -32,7 +32,6 @@ jobs:
           fi
 
           echo "Using: $XCODE_APP"
-
           sudo xcode-select -s "$XCODE_APP/Contents/Developer"
 
           xcodebuild -version
@@ -90,34 +89,15 @@ jobs:
           set -e
 
           echo "Profiles:"
-          find build-system/fake-codesigning/profiles \
-            -maxdepth 1 \
-            -type f \
-            -name "*.mobileprovision" \
-            -print \
-            | sort
+          find build-system/fake-codesigning/profiles -maxdepth 1 -type f -name "*.mobileprovision" -print | sort
 
           echo
           echo "Certificates:"
-          find build-system/fake-codesigning/certs \
-            -maxdepth 1 \
-            -type f \
-            \( -name "*.p12" -o -name "*.cer" \) \
-            -print \
-            | sort
+          find build-system/fake-codesigning/certs -maxdepth 1 -type f \( -name "*.p12" -o -name "*.cer" \) -print | sort
 
           echo
-          PROFILE_COUNT=$(find build-system/fake-codesigning/profiles \
-            -maxdepth 1 \
-            -type f \
-            -name "*.mobileprovision" \
-            | wc -l | tr -d ' ')
-
-          CERT_COUNT=$(find build-system/fake-codesigning/certs \
-            -maxdepth 1 \
-            -type f \
-            \( -name "*.p12" -o -name "*.cer" \) \
-            | wc -l | tr -d ' ')
+          PROFILE_COUNT=$(find build-system/fake-codesigning/profiles -maxdepth 1 -type f -name "*.mobileprovision" | wc -l | tr -d ' ')
+          CERT_COUNT=$(find build-system/fake-codesigning/certs -maxdepth 1 -type f \( -name "*.p12" -o -name "*.cer" \) | wc -l | tr -d ' ')
 
           echo "Provisioning profiles: $PROFILE_COUNT"
           echo "Certificates: $CERT_COUNT"
@@ -144,17 +124,8 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" /tmp/telegram-profile.plist || true
           /usr/libexec/PlistBuddy -c "Print :Entitlements:aps-environment" /tmp/telegram-profile.plist || true
 
-          APP_ID=$(
-            /usr/libexec/PlistBuddy \
-              -c "Print :Entitlements:application-identifier" \
-              /tmp/telegram-profile.plist
-          )
-
-          APS=$(
-            /usr/libexec/PlistBuddy \
-              -c "Print :Entitlements:aps-environment" \
-              /tmp/telegram-profile.plist
-          )
+          APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" /tmp/telegram-profile.plist)
+          APS=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:aps-environment" /tmp/telegram-profile.plist)
 
           test "$APP_ID" = "C67CF9S4VU.ph.telegra.Telegraph"
           test "$APS" = "production"
@@ -242,24 +213,18 @@ jobs:
           ls -lh "$IPA"
 
           echo
-          echo "IPA contents:"
-          unzip -l "$IPA" | head -n 80
-
-          echo
-          echo "Checking Payload..."
+          echo "Checking IPA contents..."
           unzip -q "$IPA" -d /tmp/swiftgram-ipa
 
-          APP="/tmp/swiftgram-ipa/Payload/Telegram.app"
+          APP="/tmp/swiftgram-ipa/Payload/Swiftgram.app"
 
           if [ ! -d "$APP" ]; then
-            echo "Telegram.app was not found inside the IPA."
-            find /tmp/swiftgram-ipa -maxdepth 4 -print
+            echo "Swiftgram.app was not found inside the IPA."
+            find /tmp/swiftgram-ipa/Payload -maxdepth 2 -print
             exit 1
           fi
 
-          echo
-          echo "App bundle:"
-          ls -lah "$APP" | head -n 40
+          echo "Swiftgram.app found successfully."
 
           echo
           echo "Bundle identifier:"
@@ -278,6 +243,9 @@ jobs:
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleVersion" \
             "$APP/Info.plist"
+
+          echo
+          echo "IPA verification completed successfully."
 
       - name: Upload Swiftgram IPA
         uses: actions/upload-artifact@v4
